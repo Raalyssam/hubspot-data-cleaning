@@ -1,0 +1,65 @@
+const hubspot = require('@hubspot/api-client');
+const hubspotClient = new hubspot.Client({ accessToken: process.env.HAPIKEY });
+
+exports.main = async (event, callback) => {
+  const contactId = event.inputFields['hs_object_id'];
+  const email = event.inputFields['email'];
+  const firstName = event.inputFields['firstname'];
+  const lastName = event.inputFields['lastname'];
+  const rawPhone = event.inputFields['phone'] || '';
+  const marketingEmailsSent = parseInt(event.inputFields['hs_email_marketing_sent'] || '0');
+  const callsMade = parseInt(event.inputFields['num_calls_made'] || '0');
+  const lastOpened = event.inputFields['hs_email_last_open_date'];
+
+  // 1. Normalizar número telefónico con +52 si no lo tiene
+  let formattedPhone = rawPhone.trim();
+  if (!formattedPhone.startsWith('+52')) {
+    const digits = formattedPhone.replace(/\D/g, '');
+    formattedPhone = '+52' + digits;
+    await hubspotClient.crm.contacts.basicApi.update(contactId, {
+      properties: {
+        phone: formattedPhone
+      }
+    });
+  }
+
+  // 2. Buscar posibles duplicados por nombre y apellido
+  const searchResponse = await hubspotClient.crm.contacts.searchApi.doSearch({
+    filterGroups: [{
+      filters: [
+        { propertyName: 'firstname', operator: 'EQ', value: firstName },
+        { propertyName: 'lastname', operator: 'EQ', value: lastName }
+      ]
+    }],
+    properties: ['email'],
+    limit: 10
+  });
+
+  let estado = '';
+
+  if (searchResponse.results.length > 1) {
+    estado = 'posible_duplicado_nombre';
+  }
+
+  // 3. Verificar si cumple con criterios de descalificación automática
+  const noOpened = !lastOpened || lastOpened === '';
+  if (marketingEmailsSent >= 2 && callsMade >= 2 && noOpened) {
+    estado += (estado ? ', ' : '') + 'descalificado_sin_respuesta';
+    await hubspotClient.crm.contacts.basicApi.update(contactId, {
+      properties: {
+        lifecycle_stage: 'disqualified'
+      }
+    });
+  }
+
+  // 4. Actualizar propiedad personalizada de estado de depuración
+  if (estado) {
+    await hubspotClient.crm.contacts.basicApi.update(contactId, {
+      properties: {
+        estado_depuracion: estado
+      }
+    });
+  }
+
+  callback({ outputFields: {} });
+};
